@@ -9,8 +9,9 @@ $.fn.extend({
   chosen: (options) ->
     # Do no harm and return as soon as possible for unsupported browsers, namely IE6 and IE7
     return this if $.browser.msie and ($.browser.version is "6.0" or  $.browser.version is "7.0")
-    $(this).each((input_field) ->
-      new Chosen(this, options) unless ($ this).hasClass "chzn-done"
+    this.each((input_field) ->
+      $this = $ this
+      $this.data('chosen', new Chosen(this, options)) unless $this.hasClass "chzn-done"
     )
 })
 
@@ -18,18 +19,17 @@ class Chosen extends AbstractChosen
 
   setup: ->
     @form_field_jq = $ @form_field
+    @current_value = @form_field_jq.val()
     @is_rtl = @form_field_jq.hasClass "chzn-rtl"
 
   finish_setup: ->
     @form_field_jq.addClass "chzn-done"
 
   set_up_html: ->
-    @container_id = if @form_field.id.length then @form_field.id.replace(/(:|\.)/g, '_') else this.generate_field_id()
+    @container_id = if @form_field.id.length then @form_field.id.replace(/[^\w]/g, '_') else this.generate_field_id()
     @container_id += "_chzn"
 
     @f_width = @form_field_jq.outerWidth()
-
-    @default_text = if @form_field_jq.data 'placeholder' then @form_field_jq.data 'placeholder' else @default_text_default
 
     container_div = ($ "<div />", {
       id: @container_id
@@ -124,7 +124,7 @@ class Chosen extends AbstractChosen
         @pending_destroy_click = false
 
   container_mouseup: (evt) ->
-    this.results_reset(evt) if evt.target.nodeName is "ABBR"
+    this.results_reset(evt) if evt.target.nodeName is "ABBR" and not @is_disabled
 
   blur_test: (evt) ->
     this.close_field() if not @active_field and @container.hasClass "chzn-container-active"
@@ -172,7 +172,7 @@ class Chosen extends AbstractChosen
       @search_choices.find("li.search-choice").remove()
       @choices = 0
     else if not @is_multiple
-      @selected_item.find("span").text @default_text
+      @selected_item.addClass("chzn-default").find("span").text(@default_text)
       if @form_field.options.length <= @disable_search_threshold
         @container.addClass "chzn-container-single-nosearch"
       else
@@ -233,8 +233,12 @@ class Chosen extends AbstractChosen
       @selected_item.addClass "chzn-single-with-drop"
       if @result_single_selected
         this.result_do_highlight( @result_single_selected )
+    else if @max_selected_options <= @choices
+      @form_field_jq.trigger("liszt:maxselected", {chosen: this})
+      return false
 
     dd_top = if @is_multiple then @container.height() else (@container.height() - 1)
+    @form_field_jq.trigger("liszt:showing_dropdown", {chosen: this})
     @dropdown.css {"top":  dd_top + "px", "left":0}
     @results_showing = true
 
@@ -246,6 +250,7 @@ class Chosen extends AbstractChosen
   results_hide: ->
     @selected_item.removeClass "chzn-single-with-drop" unless @is_multiple
     this.result_clear_highlight()
+    @form_field_jq.trigger("liszt:hiding_dropdown", {chosen: this})
     @dropdown.css {"left":"-9000px"}
     @results_showing = false
 
@@ -289,6 +294,9 @@ class Chosen extends AbstractChosen
       this.results_show()
 
   choice_build: (item) ->
+    if @is_multiple and @max_selected_options <= @choices
+      @form_field_jq.trigger("liszt:maxselected", {chosen: this})
+      return false # fire event
     choice_id = @container_id + "_c_" + item.array_index
     @choices += 1
     @search_container.before  '<li class="search-choice" id="' + choice_id + '"><span>' + item.html + '</span><a href="javascript:void(0)" class="search-choice-close" rel="' + item.array_index + '"></a></li>'
@@ -312,14 +320,17 @@ class Chosen extends AbstractChosen
     this.result_deselect (link.attr "rel")
     link.parents('li').first().remove()
 
-  results_reset: (evt) ->
+  results_reset: ->
     @form_field.options[0].selected = true
     @selected_item.find("span").text @default_text
     @selected_item.addClass("chzn-default") if not @is_multiple
     this.show_search_field_default()
-    $(evt.target).remove();
+    this.results_reset_cleanup()
     @form_field_jq.trigger "change"
     this.results_hide() if @active_field
+
+  results_reset_cleanup: ->
+    @selected_item.find("abbr").remove()
 
   result_select: (evt) ->
     if @result_highlight
@@ -353,7 +364,8 @@ class Chosen extends AbstractChosen
 
       @search_field.val ""
 
-      @form_field_jq.trigger "change"
+      @form_field_jq.trigger "change", {'selected': @form_field.options[item.options_index].value} if @is_multiple || @form_field_jq.val() != @current_value
+      @current_value = @form_field_jq.val()
       this.search_field_scale()
 
   result_activate: (el) ->
@@ -373,7 +385,7 @@ class Chosen extends AbstractChosen
     this.result_clear_highlight()
     this.winnow_results()
 
-    @form_field_jq.trigger "change"
+    @form_field_jq.trigger "change", {deselected: @form_field.options[result_data.options_index].value}
     this.search_field_scale()
 
   single_deselect_control_build: ->
@@ -427,18 +439,17 @@ class Chosen extends AbstractChosen
             this.result_deactivate result
 
     if results < 1 and searchText.length
-      main = this
-      if @form_field.options.length <= @disable_search_threshold
+      if @show_options_when_not_found
         this.winnow_results_clear()
+        this.no_results searchText unless @form_field.options.length <= @disable_search_threshold
       else
-        @container.find("li").each ->
-          main.result_activate $(this)
         this.no_results searchText
     else
       this.winnow_results_set_highlight()
 
   winnow_results_clear: ->
-    @search_field.val ""
+    @search_field.val "" unless (@show_options_when_not_found and @form_field.options.length > @disable_search_threshold)
+
     lis = @search_results.find("li")
 
     for li in lis
@@ -492,7 +503,10 @@ class Chosen extends AbstractChosen
       this.clear_backstroke()
     else
       @pending_backstroke = @search_container.siblings("li.search-choice").last()
-      @pending_backstroke.addClass "search-choice-focus"
+      if @single_backstroke_delete
+        @keydown_backstroke()
+      else
+        @pending_backstroke.addClass "search-choice-focus"
 
   clear_backstroke: ->
     @pending_backstroke.removeClass "search-choice-focus" if @pending_backstroke
